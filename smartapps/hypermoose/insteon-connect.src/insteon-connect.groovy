@@ -124,10 +124,14 @@ def callback() {
 				redirect_uri: callbackUrl
 		]
 
-		def tokenUrl = "${apiEndpoint}/oauth2/token?${toQueryString(tokenParams)}"
+		def tokenUrl = "${apiEndpoint}/oauth2/token"
+        
+        log.debug "Getting token with url: ${tokenUrl}"
 
 		try {
-            httpPost(uri: tokenUrl) { resp ->
+            httpPost(uri: tokenUrl,
+            		body: tokenParams
+            ) { resp ->
                 atomicState.refreshToken = resp.data.refresh_token
                 atomicState.authToken = resp.data.access_token
                 log.debug "atomicState.refreshToken: ${atomicState.refreshToken}"
@@ -147,47 +151,6 @@ def callback() {
 	} else {
 		log.error "callback() failed oauthState != atomicState.oauthInitState"
 	}
-}
-
-def callback2() {
-	
-    log.debug "callback called"
-
-	log.debug "callback()>> params: $params, params.code ${params.code}"
-
-	def code = params.code
-	def oauthState = params.state
-
-	if (oauthState == atomicState.oauthInitState){
-
-		def tokenParams = [
-				grant_type: "authorization_code",
-				code      : code,
-				client_id : smartThingsClientId,
-                client_secret: smartThingsClientSecret,
-				redirect_uri: callbackUrl
-		]
-
-		def tokenUrl = "${apiEndpoint}/oauth2/token?${toQueryString(tokenParams)}"
-
-		httpPost(uri: tokenUrl) { resp ->
-			atomicState.refreshToken = resp.data.refresh_token
-			atomicState.authToken = resp.data.access_token
-			log.debug "swapped token: $resp.data"
-			log.debug "atomicState.refreshToken: ${atomicState.refreshToken}"
-			log.debug "atomicState.authToken: ${atomicState.authToken}"
-		}
-
-		if (atomicState.authToken) {
-			success()
-		} else {
-			fail()
-		}
-
-	} else {
-		log.error "callback() failed oauthState != atomicState.oauthInitState"
-	}
-
 }
 
 def success() {
@@ -796,7 +759,7 @@ def getServerUrl()           { return "https://graph.api.smartthings.com" }
 def getShardUrl()            { return getApiServerUrl() }
 def getCallbackUrl()        { "https://graph.api.smartthings.com/oauth/callback" }
 def getBuildRedirectUrl()   { "${serverUrl}/oauth/initialize?appId=${app.id}&access_token=${atomicState.accessToken}&apiServerUrl=${shardUrl}" }
-def getApiEndpoint()        { "https://connect.insteon.com/api/v2/" }
+def getApiEndpoint()        { "https://connect.insteon.com/api/v2" }
 def getSmartThingsClientId() { appSettings.clientId }
 def getSmartThingsClientSecret() { appSettings.clientSecret }
 
