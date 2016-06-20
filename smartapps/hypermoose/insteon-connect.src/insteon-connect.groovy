@@ -59,6 +59,7 @@ def authPage() {
 
 	def redirectUrl = buildRedirectUrl
 	log.debug "RedirectUrl = ${redirectUrl}"
+    
 	// get rid of next button until the user is actually auth'd
 	if (!oauthTokenProvided) {
 		return dynamicPage(name: "auth", title: "Login", nextPage: "", uninstall:uninstallAllowed) {
@@ -68,27 +69,13 @@ def authPage() {
 			}
 		}
 	} else {
-    
-    	log.debug "authPage - success case"
         
-		//def stats = getEcobeeThermostats()
-		//log.debug "thermostat list: $stats"
-		//log.debug "sensor list: ${sensorsDiscovered()}"
-		return dynamicPage(name: "auth", title: "Worked", uninstall: true) {
+		def devices = getInsteonDevices()
+		log.debug "Device list: $devices"
+		return dynamicPage(name: "auth", title: "Switches", uninstall: true) {
 			section(""){
-				paragraph "It worked!"
-				//input(name: "thermostats", title:"", type: "enum", required:true, multiple:true, description: "Tap to choose", metadata:[values:stats])
+				input(name: "switches", title:"", type: "enum", required:true, multiple:true, description: "Tap to choose", metadata:[values:devices])
 			}
-
-			/*def options = sensorsDiscovered() ?: []
-			def numFound = options.size() ?: 0
-			if (numFound > 0)  {
-				section(""){
-					paragraph "Tap below to see the list of ecobee sensors available in your ecobee account and select the ones you want to connect to SmartThings."
-					input(name: "ecobeesensors", title:"Select Ecobee Sensors (${numFound} found)", type: "enum", required:false, description: "Tap to choose", multiple:true, options:options)
-				}
-			}
-            */
 		}
 	}
 }
@@ -105,7 +92,7 @@ def oauthInitUrl() {
 			redirect_uri: callbackUrl,
 	]
 
-	redirect(location: "${apiEndpoint}/oauth2/auth?${toQueryString(oauthParams)}")
+	redirect(location: "${apiEndpoint}/api/v2/oauth2/auth?${toQueryString(oauthParams)}")
 }
 
 def callback() {
@@ -124,7 +111,7 @@ def callback() {
 				redirect_uri: callbackUrl
 		]
 
-		def tokenUrl = "${apiEndpoint}/oauth2/token"
+		def tokenUrl = "${apiEndpoint}/api/v2/oauth2/token"
         
         log.debug "Getting token with url: ${tokenUrl}"
 
@@ -155,7 +142,7 @@ def callback() {
 
 def success() {
 	def message = """
-    <p>Your insteon Account is now connected to SmartThings!</p>
+    <p>Your Insteon Account is now connected to SmartThings!</p>
     <p>Click 'Done' to finish setup.</p>
     """
 	connectionStatus(message)
@@ -240,69 +227,50 @@ def connectionStatus(message, redirectUrl = null) {
 	render contentType: 'text/html', data: html
 }
 
-def getEcobeeThermostats() {
+def getInsteonDevices() {
 	log.debug "getting device list"
-	atomicState.remoteSensors = []
-
-	def requestBody = '{"selection":{"selectionType":"registered","selectionMatch":"","includeRuntime":true,"includeSensors":true}}'
 
 	def deviceListParams = [
 			uri: apiEndpoint,
-			path: "/1/thermostat",
-			headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}"],
-			query: [format: 'json', body: requestBody]
+			path: "/api/v2/devices",
+			headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
+            query: ["properties": "all"]
 	]
 
-	def stats = [:]
+	def devices = [:]
 	try {
 		httpGet(deviceListParams) { resp ->
 
 			if (resp.status == 200) {
-				resp.data.thermostatList.each { stat ->
-					atomicState.remoteSensors = atomicState.remoteSensors == null ? stat.remoteSensors : atomicState.remoteSensors <<  stat.remoteSensors
-					def dni = [app.id, stat.identifier].join('.')
-					stats[dni] = getThermostatDisplayName(stat)
+            
+            	//log.debug "response data: ${resp.data}"
+				resp.data.DeviceList.each { device ->
+                	def devCat = device.DevCat
+                    
+                    // Pick switches
+                    if (devCat == 1 || devCat == 2) {
+                        def value = "${device.DeviceName}"
+                        def key = "insteon_switch." + "${device.DeviceID}"
+                        devices["${key}"] = value
+                    }
 				}
+
 			} else {
 				log.debug "http status: ${resp.status}"
 			}
 		}
 	} catch (groovyx.net.http.HttpResponseException e) {
-        log.trace "Exception polling children: " + e.response.data.status
-        if (e.response.data.status.code == 14) {
-            atomicState.action = "getEcobeeThermostats"
+        log.trace "Exception getting devices: " + e.response.data
+        if (e.response.data.code == 4014) {
+            atomicState.action = "getInsteonDevices"
+            retry = true
             log.debug "Refreshing your auth_token!"
             refreshAuthToken()
         }
     }
-	atomicState.thermostats = stats
-	return stats
-}
-
-Map sensorsDiscovered() {
-	def map = [:]
-	log.info "list ${atomicState.remoteSensors}"
-	atomicState.remoteSensors.each { sensors ->
-		sensors.each {
-			if (it.type != "thermostat") {
-				def value = "${it?.name}"
-				def key = "ecobee_sensor-"+ it?.id + "-" + it?.code
-				map["${key}"] = value
-			}
-		}
-	}
-	atomicState.sensors = map
-	return map
-}
-
-def getThermostatDisplayName(stat) {
-	if(stat?.name)
-		return stat.name.toString()
-	return (getThermostatTypeName(stat) + " (${stat.identifier})").toString()
-}
-
-def getThermostatTypeName(stat) {
-	return stat.modelNumber == "siSmart" ? "Smart Si" : "Smart"
+                
+    atomicState.devices = devices
+	return devices
 }
 
 def installed() {
@@ -320,47 +288,30 @@ def initialize() {
 
 	log.debug "initialize"
 
-/*
-
-	def devices = thermostats.collect { dni ->
+	def devices = settings.switches.collect { dni ->
 		def d = getChildDevice(dni)
 		if(!d) {
-			d = addChildDevice(app.namespace, getChildName(), dni, null, ["label":"${atomicState.thermostats[dni]}" ?: "Ecobee Thermostat"])
+			d = addChildDevice(app.namespace, getChildName(), dni, null, ["label":"${atomicState.devices[dni]}" ?: "Insteon Switch"])
 			log.debug "created ${d.displayName} with id $dni"
 		} else {
 			log.debug "found ${d.displayName} with id $dni already exists"
 		}
 		return d
 	}
-
-	def sensors = ecobeesensors.collect { dni ->
-		def d = getChildDevice(dni)
-		if(!d) {
-			d = addChildDevice(app.namespace, getSensorChildName(), dni, null, ["label":"${atomicState.sensors[dni]}" ?:"Ecobee Sensor"])
-			log.debug "created ${d.displayName} with id $dni"
-		} else {
-			log.debug "found ${d.displayName} with id $dni already exists"
-		}
-		return d
-	}
-	log.debug "created ${devices.size()} thermostats and ${sensors.size()} sensors."
+    
+	log.debug "created ${devices.size()} devices."
 
 	def delete  // Delete any that are no longer in settings
-	if(!thermostats && !ecobeesensors) {
-		log.debug "delete thermostats ands sensors"
+	if (!devices) {
+		log.debug "delete all switches"
 		delete = getAllChildDevices() //inherits from SmartApp (data-management)
-	} else { //delete only thermostat
-		log.debug "delete individual thermostat and sensor"
-		if (!ecobeesensors) {
-			delete = getChildDevices().findAll { !thermostats.contains(it.deviceNetworkId) }
-		} else {
-			delete = getChildDevices().findAll { !thermostats.contains(it.deviceNetworkId) && !ecobeesensors.contains(it.deviceNetworkId)}
-		}
+	} else { //delete only switches
+		log.debug "delete individual switches"
+        
+		delete = getChildDevices().findAll { !settings.switches.contains(it.deviceNetworkId) }
 	}
-	log.warn "delete: ${delete}, deleting ${delete.size()} thermostats"
+	log.warn "delete: ${delete}, deleting ${delete.size()} switches"
 	delete.each { deleteChildDevice(it.deviceNetworkId) } //inherits from SmartApp (data-management)
-
-	atomicState.thermostatData = [:] //reset Map to store thermostat data
 
 	//send activity feeds to tell that device is connected
 	def notificationMessage = "is connected to SmartThings"
@@ -372,31 +323,31 @@ def initialize() {
 
 	//automatically update devices status every 5 mins
 	runEvery5Minutes("poll")
-*/
 }
 
 def pollHandler() {
 	log.debug "pollHandler()"
-	pollChildren(null) // Hit the ecobee API for update on all thermostats
+	pollChildren(null) // Hit the Insteon API for update on all switches
 
-	atomicState.thermostats.each {stat ->
+	atomicState.devices.each {stat ->
 		def dni = stat.key
 		log.debug ("DNI = ${dni}")
 		def d = getChildDevice(dni)
 		if(d) {
 			log.debug ("Found Child Device.")
-			d.generateEvent(atomicState.thermostats[dni].data)
+			d.generateEvent(atomicState.devices[dni].data)
 		}
 	}
 }
 
 def pollChildren(child = null) {
-	def thermostatIdsString = getChildDeviceIdsString()
-	log.debug "polling children: $thermostatIdsString"
+	def result = false;
+/*
+	def switchIdsString = getChildDeviceIdsString()
+	log.debug "polling children: $switchIdsString"
 	def data = ""
 
 	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + thermostatIdsString + '","includeExtendedRuntime":"true","includeSettings":"true","includeRuntime":"true","includeSensors":true}}'
-	def result = false
 
 	def pollParams = [
 			uri: apiEndpoint,
@@ -469,6 +420,7 @@ def pollChildren(child = null) {
             refreshAuthToken()
         }
 	}
+*/
 	return result
 }
 
@@ -479,16 +431,14 @@ def pollChild(){
 
 	if (pollChildren()){
 		devices.each { child ->
-			if (!child.device.deviceNetworkId.startsWith("ecobee_sensor")){
-				if(atomicState.thermostats[child.device.deviceNetworkId] != null) {
-					def tData = atomicState.thermostats[child.device.deviceNetworkId]
-					log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData.data}"
-					child.generateEvent(tData.data) //parse received message from parent
-				} else if(atomicState.thermostats[child.device.deviceNetworkId] == null) {
-					log.error "ERROR: Device connection removed? no data for ${child.device.deviceNetworkId}"
-					return null
-				}
-			}
+            if(atomicState.devices[child.device.deviceNetworkId] != null) {
+                def tData = atomicState.devices[child.device.deviceNetworkId]
+                log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData.data}"
+                child.generateEvent(tData.data) //parse received message from parent
+            } else if(atomicState.devices[child.device.deviceNetworkId] == null) {
+                log.error "ERROR: Device connection removed? no data for ${child.device.deviceNetworkId}"
+                return null
+            }
 		}
 	} else {
 		log.info "ERROR: pollChildren()"
@@ -501,94 +451,9 @@ void poll() {
 	pollChild()
 }
 
-def availableModes(child) {
-
-	debugEvent ("atomicState.thermostats = ${atomicState.thermostats}")
-
-	debugEvent ("Child DNI = ${child.device.deviceNetworkId}")
-
-	def tData = atomicState.thermostats[child.device.deviceNetworkId]
-
-	debugEvent("Data = ${tData}")
-
-	if(!tData)
-	{
-		log.error "ERROR: Device connection removed? no data for ${child.device.deviceNetworkId} after polling"
-
-		return null
-	}
-
-	def modes = ["off"]
-
-	if (tData.data.heatMode) modes.add("heat")
-	if (tData.data.coolMode) modes.add("cool")
-	if (tData.data.autoMode) modes.add("auto")
-	if (tData.data.auxHeatMode) modes.add("auxHeatOnly")
-
-	modes
-
-}
-
-def currentMode(child) {
-	debugEvent ("atomicState.Thermos = ${atomicState.thermostats}")
-
-	debugEvent ("Child DNI = ${child.device.deviceNetworkId}")
-
-	def tData = atomicState.thermostats[child.device.deviceNetworkId]
-
-	debugEvent("Data = ${tData}")
-
-	if(!tData) {
-		log.error "ERROR: Device connection removed? no data for ${child.device.deviceNetworkId} after polling"
-
-
-		return null
-	}
-
-	def mode = tData.data.thermostatMode
-
-	mode
-}
-
-def updateSensorData() {
-	atomicState.remoteSensors.each {
-		it.each {
-			if (it.type != "thermostat") {
-				def temperature = ""
-				def occupancy = ""
-				it.capability.each {
-					if (it.type == "temperature") {
-						if (it.value == "unknown") {
-							temperature = "--"
-						} else {
-							if (location.temperatureScale == "F") {
-								temperature = Math.round(it.value.toDouble() / 10)
-							} else {
-								temperature = convertFtoC(it.value.toDouble() / 10)
-							}
-
-						}
-
-					} else if (it.type == "occupancy") {
-						if(it.value == "true")
-							occupancy = "active"
-						else
-							occupancy = "inactive"
-					}
-				}
-				def dni = "ecobee_sensor-"+ it?.id + "-" + it?.code
-				def d = getChildDevice(dni)
-				if(d) {
-					d.sendEvent(name:"temperature", value: temperature)
-					d.sendEvent(name:"motion", value: occupancy)
-				}
-			}
-		}
-	}
-}
 
 def getChildDeviceIdsString() {
-	return thermostats.collect { it.split(/\./).last() }.join(',')
+	return switches.collect { it.split(/\./).last() }.join(',')
 }
 
 def toJson(Map m) {
@@ -609,13 +474,13 @@ private refreshAuthToken() {
 		def refreshParams = [
 				method: 'POST',
 				uri   : apiEndpoint,
-				path  : "/token",
-				query : [grant_type: 'refresh_token', code: "${atomicState.refreshToken}", client_id: smartThingsClientId],
+				path  : "/api/v2/oauth2/token",
+				body : [grant_type: 'refresh_token', refresh_token: "${atomicState.refreshToken}", client_id: smartThingsClientId, client_secret: smartThingsClientSecret],
 		]
 
 		log.debug refreshParams
 
-		def notificationMessage = "is disconnected from SmartThings, because the access credential changed or was lost. Please go to the Ecobee (Connect) SmartApp and re-enter your account login credentials."
+		def notificationMessage = "is disconnected from SmartThings, because the access credential changed or was lost. Please go to the Insteon (Connect) SmartApp and re-enter your account login credentials."
 		//changed to httpPost
 		try {
 			def jsonMap
@@ -672,40 +537,26 @@ private refreshAuthToken() {
 	}
 }
 
-def resumeProgram(child, deviceId) {
+def switchOn(child, deviceId) {
 
-
-	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"functions": [{"type": "resumeProgram"}]}'
-	def result = sendJson(jsonRequestBody)
-	return result
-}
-
-def setHold(child, heating, cooling, deviceId, sendHoldType) {
-
-	int h = heating * 10
-	int c = cooling * 10
-	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"functions": [{ "type": "setHold", "params": { "coolHoldTemp": '+c+',"heatHoldTemp": '+h+', "holdType": '+sendHoldType+' } } ]}'
-
-	def result = sendJson(child, jsonRequestBody)
-	return result
-}
-
-def setFanMode(child, heating, cooling, deviceId, sendHoldType, fanMode) {
-
-	int h = heating * 10
-	int c = cooling * 10
-
-
-	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"functions": [{ "type": "setHold", "params": { "coolHoldTemp": '+c+',"heatHoldTemp": '+h+', "holdType": '+sendHoldType+', "fan": '+fanMode+' } } ]}'
-	def result = sendJson(child, jsonRequestBody)
-	return result
-}
-
-def setMode(child, mode, deviceId) {
+/*
 	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"thermostat": {"settings":{"hvacMode":"'+"${mode}"+'"}}}'
 
 	def result = sendJson(jsonRequestBody)
 	return result
+*/
+	return true;
+}
+
+def switchOff(child, deviceId) {
+
+/*
+	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"thermostat": {"settings":{"hvacMode":"'+"${mode}"+'"}}}'
+
+	def result = sendJson(jsonRequestBody)
+	return result
+*/
+	return true;
 }
 
 def sendJson(child = null, String jsonBody) {
@@ -753,13 +604,12 @@ def sendJson(child = null, String jsonBody) {
 		return false
 }
 
-def getChildName()           { "Ecobee Thermostat" }
-def getSensorChildName()     { "Ecobee Sensor" }
+def getChildName()           { "Insteon Switch" }
 def getServerUrl()           { return "https://graph.api.smartthings.com" }
 def getShardUrl()            { return getApiServerUrl() }
 def getCallbackUrl()        { "https://graph.api.smartthings.com/oauth/callback" }
 def getBuildRedirectUrl()   { "${serverUrl}/oauth/initialize?appId=${app.id}&access_token=${atomicState.accessToken}&apiServerUrl=${shardUrl}" }
-def getApiEndpoint()        { "https://connect.insteon.com/api/v2" }
+def getApiEndpoint()        { "https://connect.insteon.com" }
 def getSmartThingsClientId() { appSettings.clientId }
 def getSmartThingsClientSecret() { appSettings.clientSecret }
 
@@ -785,12 +635,12 @@ def sendPushAndFeeds(notificationMessage){
 	log.warn "sendPushAndFeeds >> atomicState.timeSendPush: ${atomicState.timeSendPush}"
 	if (atomicState.timeSendPush){
 		if (now() - atomicState.timeSendPush > 86400000){ // notification is sent to remind user once a day
-			sendPush("Your Ecobee thermostat " + notificationMessage)
+			sendPush("Your Insteon switch " + notificationMessage)
 			sendActivityFeeds(notificationMessage)
 			atomicState.timeSendPush = now()
 		}
 	} else {
-		sendPush("Your Ecobee thermostat " + notificationMessage)
+		sendPush("Your Insteon switch " + notificationMessage)
 		sendActivityFeeds(notificationMessage)
 		atomicState.timeSendPush = now()
 	}
@@ -802,16 +652,4 @@ def sendActivityFeeds(notificationMessage) {
 	devices.each { child ->
 		child.generateActivityFeedsEvent(notificationMessage) //parse received message from parent
 	}
-}
-
-def roundC (tempC) {
-	return String.format("%.1f", (Math.round(tempC * 2))/2)
-}
-
-def convertFtoC (tempF) {
-	return String.format("%.1f", (Math.round(((tempF - 32)*(5/9)) * 2))/2)
-}
-
-def convertCtoF (tempC) {
-	return (Math.round(tempC * (9/5)) + 32).toInteger()
 }
