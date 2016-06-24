@@ -318,8 +318,12 @@ def initialize() {
 	sendActivityFeeds(notificationMessage)
 	atomicState.timeSendPush = null
 	atomicState.reAttempt = 0
+    
+    // reset the poll data and deviceStatus
+    atomicState.pollData = [:]
+    atomicState.deviceStatus = [:]
 
-	pollHandler() //first time polling data data from thermostat
+	pollHandler() //first time polling
 
 	//automatically update devices status every 5 mins
 	runEvery5Minutes("poll")
@@ -335,93 +339,88 @@ def pollHandler() {
 		def d = getChildDevice(dni)
 		if(d) {
 			log.debug ("Found Child Device.")
-			d.generateEvent(atomicState.devices[dni].data)
+            // TODO fix this
+			//d.generateEvent(atomicState.status[dni])
 		}
 	}
 }
 
 def pollChildren(child = null) {
 	def result = false;
-/*
-	def switchIdsString = getChildDeviceIdsString()
-	log.debug "polling children: $switchIdsString"
-	def data = ""
+    
+  	def pollData = atomicState.pollData
+    def deviceStatus = atomicState.deviceStatus
+    log.debug "pollData = ${pollData}"
+    log.debug "deviceStatus = ${deviceStatus}"
+   
+    settings.switches.collect { dni ->
+    	def deviceId = dni.split(/\./).last()        
+        log.debug "polling child: $deviceId"
+           
+        try {
+            if (pollData[dni] == null) {
+            
+                def cmdParams = [
+                    uri: apiEndpoint,
+                    path: "/api/v2/commands",
+                    headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
+                    body: '{ "command": "get_status", "device_id": ' + "${deviceId}" + ' }'
+                ]
+                httpPost(cmdParams) { resp ->
+                    if(resp.status == 200 || resp.status == 202) {
+                        if (resp.data.status == "pending") {
+                            log.debug "command still pending for ${dni}"
+                            pollData[dni] = resp.data.link
+                        } else {
+                        	log.error "Unexpected result: ${resp.data}"
+                        }
+                    }
+                }
+            } else {
+            
+            	def getParams = [
+                    uri: apiEndpoint,
+                    path: pollData[dni],
+                    headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
+                ]
+                httpGet(getParams) { resp ->
+                    log.debug "Response status: ${resp.status}"
+                    if(resp.status == 200) {
 
-	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + thermostatIdsString + '","includeExtendedRuntime":"true","includeSettings":"true","includeRuntime":"true","includeSensors":true}}'
+                        log.debug "updated ${resp.data}"
 
-	def pollParams = [
-			uri: apiEndpoint,
-			path: "/1/thermostat",
-			headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}"],
-			query: [format: 'json', body: jsonRequestBody]
-	]
-
-	try{
-		httpGet(pollParams) { resp ->
-			if(resp.status == 200) {
-				log.debug "poll results returned resp.data ${resp.data}"
-				atomicState.remoteSensors = resp.data.thermostatList.remoteSensors
-				atomicState.thermostatData = resp.data
-				updateSensorData()
-				atomicState.thermostats = resp.data.thermostatList.inject([:]) { collector, stat ->
-					def dni = [ app.id, stat.identifier ].join('.')
-
-					log.debug "updating dni $dni"
-
-					data = [
-							coolMode: (stat.settings.coolStages > 0),
-							heatMode: (stat.settings.heatStages > 0),
-							deviceTemperatureUnit: stat.settings.useCelsius,
-							minHeatingSetpoint: (stat.settings.heatRangeLow / 10),
-							maxHeatingSetpoint: (stat.settings.heatRangeHigh / 10),
-							minCoolingSetpoint: (stat.settings.coolRangeLow / 10),
-							maxCoolingSetpoint: (stat.settings.coolRangeHigh / 10),
-							autoMode: stat.settings.autoHeatCoolFeatureEnabled,
-							auxHeatMode: (stat.settings.hasHeatPump) && (stat.settings.hasForcedAir || stat.settings.hasElectric || stat.settings.hasBoiler),
-							temperature: (stat.runtime.actualTemperature / 10),
-							heatingSetpoint: stat.runtime.desiredHeat / 10,
-							coolingSetpoint: stat.runtime.desiredCool / 10,
-							thermostatMode: stat.settings.hvacMode,
-							humidity: stat.runtime.actualHumidity,
-							thermostatFanMode: stat.runtime.desiredFanMode
-					]
-
-					if (location.temperatureScale == "F")
-					{
-						data["temperature"] = data["temperature"] ? Math.round(data["temperature"].toDouble()) : data["temperature"]
-						data["heatingSetpoint"] = data["heatingSetpoint"] ? Math.round(data["heatingSetpoint"].toDouble()) : data["heatingSetpoint"]
-						data["coolingSetpoint"] = data["coolingSetpoint"] ? Math.round(data["coolingSetpoint"].toDouble()) : data["coolingSetpoint"]
-						data["minHeatingSetpoint"] = data["minHeatingSetpoint"] ? Math.round(data["minHeatingSetpoint"].toDouble()) : data["minHeatingSetpoint"]
-						data["maxHeatingSetpoint"] = data["maxHeatingSetpoint"] ? Math.round(data["maxHeatingSetpoint"].toDouble()) : data["maxHeatingSetpoint"]
-						data["minCoolingSetpoint"] = data["minCoolingSetpoint"] ? Math.round(data["minCoolingSetpoint"].toDouble()) : data["minCoolingSetpoint"]
-						data["maxCoolingSetpoint"] = data["maxCoolingSetpoint"] ? Math.round(data["maxCoolingSetpoint"].toDouble()) : data["maxCoolingSetpoint"]
-
-					}
-
-					if (data?.deviceTemperatureUnit == false && location.temperatureScale == "F") {
-						data["deviceTemperatureUnit"] = "F"
-
-					} else {
-						data["deviceTemperatureUnit"] = "C"
-					}
-
-					collector[dni] = [data:data]
-					return collector
-				}
-				result = true
-				log.debug "updated ${atomicState.thermostats?.size()} stats: ${atomicState.thermostats}"
-			}
-		}
-	} catch (groovyx.net.http.HttpResponseException e) {
-		log.trace "Exception polling children: " + e.response.data.status
-        if (e.response.data.status.code == 14) {
-            atomicState.action = "pollChildren"
-            log.debug "Refreshing your auth_token!"
-            refreshAuthToken()
+                        if (resp.data.status == "succeeded") {
+                            pollData[dni] = null  // Clear the poll data
+                            deviceStatus[dni] = resp.data.response  // Save the response
+                        } else if (resp.data.status != "pending") {
+                        	log.error "Unexpected result: ${resp.data}"
+                            pollData[dni] = null  // Clear the poll data
+                        }
+                    }
+                }
+            }
+        } catch (groovyx.net.http.HttpResponseException e) {
+            log.trace "Exception Sending Json: " + e.response.data
+            debugEvent ("sent Json & got http status ${e.statusCode}")
+            if (e.response.data.code == 4014) {
+                atomicState.action = "pollChildren"
+                log.debug "Refreshing your auth_token!"
+                refreshAuthToken()
+                return true
+            }
+            else {
+                debugEvent("Authentication error, invalid authentication method, lack of credentials, etc.")
+                log.error "Authentication error, invalid authentication method, lack of credentials, etc."
+            }
         }
-	}
-*/
-	return result
+    }
+    
+    atomicState.pollData = pollData
+    atomicState.deviceStatus = deviceStatus
+    log.debug "updated pollData = ${pollData}"
+    log.debug "updated deviceStatus = ${deviceStatus}"
+    
+	return true
 }
 
 // Poll Child is invoked from the Child Device itself as part of the Poll Capability
@@ -429,31 +428,23 @@ def pollChild(){
 
 	def devices = getChildDevices()
 
-	if (pollChildren()){
+	if (pollChildren() ){
 		devices.each { child ->
-            if(atomicState.devices[child.device.deviceNetworkId] != null) {
-                def tData = atomicState.devices[child.device.deviceNetworkId]
-                log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData.data}"
-                child.generateEvent(tData.data) //parse received message from parent
-            } else if(atomicState.devices[child.device.deviceNetworkId] == null) {
-                log.error "ERROR: Device connection removed? no data for ${child.device.deviceNetworkId}"
-                return null
-            }
+            if(atomicState.deviceStatus[child.device.deviceNetworkId] != null) {
+                def tData = atomicState.deviceStatus[child.device.deviceNetworkId]
+                log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData}"
+                child.generateEvent(tData) //parse received message from parent
+           }
 		}
 	} else {
 		log.info "ERROR: pollChildren()"
 		return null
 	}
-
 }
 
 void poll() {
+	log.debug "poll() called"
 	pollChild()
-}
-
-
-def getChildDeviceIdsString() {
-	return switches.collect { it.split(/\./).last() }.join(',')
 }
 
 def toJson(Map m) {
@@ -537,35 +528,44 @@ private refreshAuthToken() {
 	}
 }
 
-def switchOn(child, deviceId) {
+def switchOn(child, deviceNetworkId) {
 
-/*
-	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"thermostat": {"settings":{"hvacMode":"'+"${mode}"+'"}}}'
+	def deviceId = deviceNetworkId.split(/\./).last()
+    
+    def deviceStatus = atomicState.deviceStatus;
 
+	def jsonRequestBody = '{ "command": "on", "device_id": ' + "${deviceId}" + ' }'
 	def result = sendJson(jsonRequestBody)
+    
+    if (result) {
+    	deviceStatus[deviceNetworkId] = '{level: 100}'
+        atomicState.deviceStatus = deviceStatus
+    }
 	return result
-*/
-	return true;
 }
 
-def switchOff(child, deviceId) {
+def switchOff(child, deviceNetworkId) {
 
-/*
-	def jsonRequestBody = '{"selection":{"selectionType":"thermostats","selectionMatch":"' + deviceId + '","includeRuntime":true},"thermostat": {"settings":{"hvacMode":"'+"${mode}"+'"}}}'
+	def deviceId = deviceNetworkId.split(/\./).last()
+    
+    def deviceStatus = atomicState.deviceStatus;
 
+	def jsonRequestBody = '{ "command": "off", "device_id": ' + "${deviceId}" + ' }'
 	def result = sendJson(jsonRequestBody)
+    if (result) {
+    	deviceStatus[deviceNetworkId] = '{level: 0}'
+        atomicState.deviceStatus = deviceStatus
+    }
 	return result
-*/
-	return true;
 }
 
 def sendJson(child = null, String jsonBody) {
 
-	def returnStatus = false
+	def returnStatus = "not sent"
 	def cmdParams = [
 			uri: apiEndpoint,
-			path: "/1/thermostat",
-			headers: ["Content-Type": "application/json", "Authorization": "Bearer ${atomicState.authToken}"],
+			path: "/api/v2/commands",
+			headers: ["Content-Type": "text/json", "Authorization": "Bearer ${atomicState.authToken}", "Authentication": "APIKey ${smartThingsClientId}"],
 			body: jsonBody
 	]
 
@@ -575,9 +575,9 @@ def sendJson(child = null, String jsonBody) {
 			if(resp.status == 200) {
 
 				log.debug "updated ${resp.data}"
-				returnStatus = resp.data.status.code
-				if (resp.data.status.code == 0)
-					log.debug "Successful call to ecobee API."
+				returnStatus = resp.data.status
+				if (resp.data.status != "failed")
+					log.debug "Successful call to insteaon API."
 				else {
 					log.debug "Error return code = ${resp.data.status.code}"
 					debugEvent("Error return code = ${resp.data.status.code}")
@@ -587,7 +587,7 @@ def sendJson(child = null, String jsonBody) {
 	} catch (groovyx.net.http.HttpResponseException e) {
         log.trace "Exception Sending Json: " + e.response.data.status
         debugEvent ("sent Json & got http status ${e.statusCode} - ${e.response.data.status.code}")
-        if (e.response.data.status.code == 14) {
+         if (e.response.data.code == 4014) {
             atomicState.action = "pollChildren"
             log.debug "Refreshing your auth_token!"
             refreshAuthToken()
@@ -598,7 +598,7 @@ def sendJson(child = null, String jsonBody) {
         }
     }
 
-	if (returnStatus == 0)
+	if (returnStatus != "failed")
 		return true
 	else
 		return false
