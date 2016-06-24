@@ -39,19 +39,37 @@ def parse(String description) {
 	log.debug "Parsing '${description}'"
 }
 
+void poll() {
+	log.debug "Executing 'poll' using parent SmartApp"
+	parent.pollChild()
+}
+
+def generateEvent(Map results) {
+	log.debug "generateEvent: parsing data $results"
+	if(results) {
+    	def level = results.level
+		sendEvent(name: "switch", value: level == 100 ? "on" : "off")
+    }
+    
+    return null
+}
+
+
 def off() {
 	log.debug "off"
-	def deviceId = device.deviceNetworkId.split(/\./).last()
-	if (!parent.switchOff(this, deviceId)) {
+
+	if (!parent.switchOff(this, device.deviceNetworkId)) {
 		log.debug "Error turning switch off"
 	}
 }
 
 def on() {
 	log.debug "on"
-	def deviceId = device.deviceNetworkId.split(/\./).last()
-	if (!parent.switchOn(this, deviceId)) {
+
+	if (!parent.switchOn(this, device.deviceNetworkId)) {
 		log.debug "Error turning switch on"
 	}
 }
+
+
 
