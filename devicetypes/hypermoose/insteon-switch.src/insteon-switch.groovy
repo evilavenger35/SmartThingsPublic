@@ -60,7 +60,9 @@ def off() {
 
 	if (!parent.switchOff(this, device.deviceNetworkId)) {
 		log.debug "Error turning switch off"
-	}
+	} else {
+    	sendEvent(name: "switch", value: "off")
+    }
 }
 
 def on() {
@@ -68,7 +70,9 @@ def on() {
 
 	if (!parent.switchOn(this, device.deviceNetworkId)) {
 		log.debug "Error turning switch on"
-	}
+	} else {
+    	sendEvent(name: "switch", value: "on")
+    }
 }
 
 
