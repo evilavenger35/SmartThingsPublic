@@ -458,6 +458,15 @@ def checkPendingRequests() {
         runIn(60, checkPendingRequests);
     }
     
+    // Generate events for changes
+    devices.each { child ->
+        if(atomicState.deviceStatus[child.device.deviceNetworkId] != null) {
+            def tData = atomicState.deviceStatus[child.device.deviceNetworkId]
+            log.info "pollChild(child)>> data for ${child.device.deviceNetworkId} : ${tData}"
+            child.generateEvent(tData) //parse received message from parent
+       }
+    }
+    
 	return true
 }
 
