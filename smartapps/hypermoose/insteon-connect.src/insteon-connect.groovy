@@ -21,8 +21,8 @@ definition(
 		author: "hypermoose",
 		description: "Connect your Insteon Hub to SmartThings.",
 		category: "",
-		iconUrl: "https://s3.amazonaws.com/smartapp-icons/Partner/ecobee.png",
-		iconX2Url: "https://s3.amazonaws.com/smartapp-icons/Partner/ecobee@2x.png",
+		iconUrl: "https://hypermoose-icons.s3.amazonaws.com/insteon.png",
+		iconX2Url: "https://hypermoose-icons.s3.amazonaws.com/insteon@2x.png",
 		singleInstance: true
 ) {
 	appSetting "clientId"
@@ -112,8 +112,6 @@ def callback() {
 		]
 
 		def tokenUrl = "${apiEndpoint}/api/v2/oauth2/token"
-        
-        log.debug "Getting token with url: ${tokenUrl}"
 
 		try {
             httpPost(uri: tokenUrl,
@@ -215,7 +213,7 @@ def connectionStatus(message, redirectUrl = null) {
 </head>
 <body>
         <div class="container">
-                <img src="https://s3.amazonaws.com/smartapp-icons/Partner/ecobee%402x.png" alt="ecobee icon" />
+                <img src="https://hypermoose-icons.s3.amazonaws.com/insteon%402x.png" alt="insteon icon" />
                 <img src="https://s3.amazonaws.com/smartapp-icons/Partner/support/connected-device-icn%402x.png" alt="connected device icon" />
                 <img src="https://s3.amazonaws.com/smartapp-icons/Partner/support/st-logo%402x.png" alt="SmartThings logo" />
                 ${message}
@@ -242,8 +240,7 @@ def getInsteonDevices() {
 		httpGet(deviceListParams) { resp ->
 
 			if (resp.status == 200) {
-            
-            	//log.debug "response data: ${resp.data}"
+           
 				resp.data.DeviceList.each { device ->
                 	def devCat = device.DevCat
                     
@@ -261,7 +258,7 @@ def getInsteonDevices() {
 		}
 	} catch (groovyx.net.http.HttpResponseException e) {
         log.trace "Exception getting devices: " + e.response.data
-        if (e.response.data.code == 4014) {
+        if (e.response.data.code == 4014 || e.response.data.code == 4012) {
             atomicState.action = "getInsteonDevices"
             retry = true
             log.debug "Refreshing your auth_token!"
@@ -332,33 +329,22 @@ def initialize() {
 def pollHandler() {
 	log.debug "pollHandler()"
 	pollChildren(null) // Hit the Insteon API for update on all switches
-
-	atomicState.devices.each {stat ->
-		def dni = stat.key
-		log.debug ("DNI = ${dni}")
-		def d = getChildDevice(dni)
-		if(d) {
-			log.debug ("Found Child Device.")
-            // TODO fix this
-			//d.generateEvent(atomicState.status[dni])
-		}
-	}
 }
 
 def pollChildren(child = null) {
 	def result = false;
+    def hasPending = false;
     
   	def pollData = atomicState.pollData
     def deviceStatus = atomicState.deviceStatus
-    log.debug "pollData = ${pollData}"
-    log.debug "deviceStatus = ${deviceStatus}"
    
     settings.switches.collect { dni ->
     	def deviceId = dni.split(/\./).last()        
-        log.debug "polling child: $deviceId"
            
         try {
             if (pollData[dni] == null) {
+            
+            	log.debug "polling child: $deviceId"
             
                 def cmdParams = [
                     uri: apiEndpoint,
@@ -371,13 +357,58 @@ def pollChildren(child = null) {
                         if (resp.data.status == "pending") {
                             log.debug "command still pending for ${dni}"
                             pollData[dni] = resp.data.link
+                            hasPending = true
                         } else {
                         	log.error "Unexpected result: ${resp.data}"
                         }
                     }
                 }
-            } else {
+        	}
+        } catch (groovyx.net.http.HttpResponseException e) {
+            log.trace "Exception Sending Json: " + e.response.data
+            debugEvent ("sent Json & got http status ${e.statusCode}")
+            if (e.response.data.code == 4014 || e.response.data.code == 4012) {
+                atomicState.action = "pollChildren"
+                log.debug "Refreshing your auth_token!"
+                refreshAuthToken()
+                return true
+            }
+            else {
+                debugEvent("Authentication error, invalid authentication method, lack of credentials, etc.")
+                log.error "Authentication error, invalid authentication method, lack of credentials, etc."
+            }
+        }
+    }
+    
+    atomicState.pollData = pollData
+    atomicState.deviceStatus = deviceStatus
+    log.debug "pollChildren updated pollData = ${pollData}"
+    log.debug "pollChildren updated deviceStatus = ${deviceStatus}"
+    
+    if (hasPending) {
+   		log.debug "Scheduling checkPendingRequests"
+    	runIn(60, "checkPendingRequests")
+    }
+    
+	return true
+}
+
+def checkPendingRequests() {
+	def stillPending = false;
+    
+    log.debug "checkPendingRequests called"
+    
+  	def pollData = atomicState.pollData
+    def deviceStatus = atomicState.deviceStatus
+   
+    settings.switches.collect { dni ->
+    	def deviceId = dni.split(/\./).last()        
+           
+        try {
+            if (pollData[dni] != null) {
             
+                log.debug "Checking pending request for ${dni}"         
+             
             	def getParams = [
                     uri: apiEndpoint,
                     path: pollData[dni],
@@ -395,6 +426,8 @@ def pollChildren(child = null) {
                         } else if (resp.data.status != "pending") {
                         	log.error "Unexpected result: ${resp.data}"
                             pollData[dni] = null  // Clear the poll data
+                        } else {
+                        	stillPending = true;
                         }
                     }
                 }
@@ -402,8 +435,8 @@ def pollChildren(child = null) {
         } catch (groovyx.net.http.HttpResponseException e) {
             log.trace "Exception Sending Json: " + e.response.data
             debugEvent ("sent Json & got http status ${e.statusCode}")
-            if (e.response.data.code == 4014) {
-                atomicState.action = "pollChildren"
+            if (e.response.data.code == 4014 || e.response.data.code == 4012) {
+                atomicState.action = "checkPendingRequests"
                 log.debug "Refreshing your auth_token!"
                 refreshAuthToken()
                 return true
@@ -417,11 +450,17 @@ def pollChildren(child = null) {
     
     atomicState.pollData = pollData
     atomicState.deviceStatus = deviceStatus
-    log.debug "updated pollData = ${pollData}"
-    log.debug "updated deviceStatus = ${deviceStatus}"
+    log.debug "checkPendingRequests updated pollData = ${pollData}"
+    log.debug "checkPendingRequests updated deviceStatus = ${deviceStatus}"
+    
+    if (stillPending) {
+    	log.debug "Rescheduling checkPendingRequests"
+        runIn(60, checkPendingRequests);
+    }
     
 	return true
 }
+
 
 // Poll Child is invoked from the Child Device itself as part of the Poll Capability
 def pollChild(){
@@ -445,10 +484,6 @@ def pollChild(){
 void poll() {
 	log.debug "poll() called"
 	pollChild()
-}
-
-def toJson(Map m) {
-	return new org.json.JSONObject(m).toString()
 }
 
 def toQueryString(Map m) {
@@ -587,7 +622,7 @@ def sendJson(child = null, String jsonBody) {
 	} catch (groovyx.net.http.HttpResponseException e) {
         log.trace "Exception Sending Json: " + e.response.data.status
         debugEvent ("sent Json & got http status ${e.statusCode} - ${e.response.data.status.code}")
-         if (e.response.data.code == 4014) {
+         if (e.response.data.code == 4014 || e.response.data.code == 4012) {
             atomicState.action = "pollChildren"
             log.debug "Refreshing your auth_token!"
             refreshAuthToken()
@@ -623,10 +658,6 @@ def debugEvent(message, displayEvent = false) {
 	log.debug "Generating AppDebug Event: ${results}"
 	sendEvent (results)
 
-}
-
-def debugEventFromParent(child, message) {
-	if (child != null) { child.sendEvent("name":"debugEventFromParent", "value":message, "description":message, displayed: true, isStateChange: true)}
 }
 
 //send both push notification and mobile activity feeds
